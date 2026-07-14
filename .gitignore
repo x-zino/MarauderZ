@@ -18,8 +18,7 @@ __pycache__/
 # Arduino build cache
 /firmware/*/build/
 
-# PyInstaller build output
+# PyInstaller build output (MarauderZ.exe itself is tracked, not ignored)
 /build/
 /dist/
 *.spec
-MarauderZ.exe
