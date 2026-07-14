@@ -1,0 +1,25 @@
+# Third-party downloads (see README - fetched by the tools/GUI, not source)
+# Keep the hashcat archive itself, but not the extracted install or rockyou.txt
+/downloads/*
+!/downloads/hashcat-7.1.2+338.7z
+
+# Your own run output: captured handshakes, converted hashes, cracked passwords
+/captures/
+
+# hashcat run state
+hashcat.potfile
+*.restore
+*.log
+
+# Python
+__pycache__/
+*.pyc
+
+# Arduino build cache
+/firmware/*/build/
+
+# PyInstaller build output
+/build/
+/dist/
+*.spec
+MarauderZ.exe
