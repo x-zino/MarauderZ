@@ -10,7 +10,7 @@ Interactive front-end for the ESP32 handshake-capture sketch.
   (LINKTYPE_IEEE802_11) for offline analysis with hashcat / hcxtools.
 
 Usage:
-    python3 capture_handshake.py [/dev/ttyUSB0] [baud] [output.pcap]
+    python3 MarauderZ_CLI.py [/dev/ttyUSB0] [baud] [output.pcap]
 
 With no arguments, defaults to COM30 @ 115200, writing to
 captures/handshake.pcap next to this script.

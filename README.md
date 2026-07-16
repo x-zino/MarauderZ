@@ -9,10 +9,9 @@ doesn't support monitor mode or packet injection — the ESP32 does the
 over-the-air work instead, and your Windows PC does the offline cracking
 with `hashcat`.
 
-A Linux/Raspberry Pi version of this same workflow is documented in
-[`HANDSHAKE_TUTORIAL.md`](docs/HANDSHAKE_TUTORIAL.md), but Windows is this
-project's main target: this document is the primary, actively-maintained
-workflow, with a GUI built specifically for it (see below).
+Windows is this project's only target platform: this document is the
+primary, actively-maintained workflow, with a GUI built specifically for
+it (see below).
 
 <p align="center"><img src="photos/logo.png" alt="MarauderZ logo" width="180"></p>
 
@@ -27,20 +26,28 @@ Every step below can be run either as a command you type, or as a button
 in a desktop app — pick whichever you're comfortable with, they drive
 the exact same underlying logic:
 
-- **GUI** — `python gui.py` opens a tabbed window (Flash / Capture /
-  Convert / Inspect & Isolate / Crack / Results) with a browse button for
-  every file path and a COM-port dropdown, so nothing needs to be typed
-  by hand. Recommended if you're new to the command line.
+- **GUI** — `python MarauderZ_GUI.py`, or just double-click the prebuilt
+  **`MarauderZ.exe`** (no Python install needed) — opens a tabbed,
+  scrollable window (Flash / Capture / Convert / Inspect & Isolate /
+  Crack / Results) with a browse button for every file path and a
+  COM-port dropdown, so nothing needs to be typed by hand. Recommended
+  if you're new to the command line.
 - **CLI** — the numbered steps below, run directly in PowerShell. Gives
   you the raw commands and output, useful for scripting or if you just
   prefer a terminal.
 
 Both need the same prerequisites (Python 3 + pyserial); the GUI adds no
-extra dependency, since it's built on Python's built-in `tkinter`.
+extra dependency, since it's built on Python's built-in `tkinter`. If you
+modify `MarauderZ_GUI.py` and want to rebuild `MarauderZ.exe`, run
+[`build_exe.ps1`](build_exe.ps1) (or double-click `build_exe.bat`) — it
+finds a working Python automatically, installs PyInstaller if needed, and
+bundles the logo (`photos\logo.ico`/`logo.png`) into the exe itself so the
+icon/taskbar/title-bar branding shows up even if someone only has the
+standalone exe with no other project files next to it.
 
 ### Using the GUI (quick steps)
 
-`python gui.py`, then work through the tabs left to right — every
+`python MarauderZ_GUI.py`, then work through the tabs left to right — every
 default path already points at `downloads/` or `captures/`, and every
 Browse dialog opens there too, so there's rarely anything to type:
 
@@ -51,8 +58,13 @@ Browse dialog opens there too, so there's rarely anything to type:
    (converts locally via WSL) to turn the `.pcap` into a `.hc22000` file.
 4. **Inspect & Isolate** — List Entries, click your network's row,
    Isolate Selected Network.
-5. **Crack** — browse to hashcat.exe, the isolated hash file, and a
-   wordlist, then Start Cracking.
+5. **Crack** — browse to hashcat.exe and the isolated hash file, choose
+   **Dictionary** (wordlist) or **Mask / brute-force** attack mode, click
+   **Detect Devices** to pick your GPU (a discrete NVIDIA GPU is
+   preferred automatically over a slower Intel iGPU), optionally
+   **Estimate Time** first to see how long a full run will take, then
+   **Start Cracking** — a live progress bar, GPU status, and ETA update
+   as it runs.
 6. **Results** — the recovered password (or "no password found") shows
    immediately as a popup and a large banner, and stays browsable in the
    Results tab afterwards.
@@ -93,7 +105,7 @@ a live scan:
 
 Any EAPOL frame the ESP32 observes (a real handshake, or its own PMKID
 attempt) is hex-dumped over serial and reconstructed into a real `.pcap`
-by [`capture_handshake.py`](capture_handshake.py). From there,
+by [`MarauderZ_CLI.py`](MarauderZ_CLI.py). From there,
 `hashcat` verifies candidate passwords completely offline — no further
 contact with the AP required. That makes password *strength* the entire
 game: if a wordlist or mask attack cracks it, the password was the weak
@@ -112,13 +124,14 @@ point, not any implementation flaw in WPA2.
 
 | Tool | Purpose | Download |
 |---|---|---|
-| Python 3 | Runs `capture_handshake.py` and `list_hc22000.py` | [python.org/downloads/windows](https://www.python.org/downloads/windows/) |
+| Python 3 | Runs `MarauderZ_CLI.py` and `list_hc22000.py` | [python.org/downloads/windows](https://www.python.org/downloads/windows/) |
 | pyserial | Python package for serial/COM port I/O | installed via `pip` (below) |
 | Arduino CLI *(only needed if (re)flashing the sketch)* | Compiles/uploads the `.ino` sketch to the ESP32 | [arduino.github.io/arduino-cli](https://arduino.github.io/arduino-cli/latest/installation/) |
 | ESP32 Arduino core | Board support package for Arduino CLI | [github.com/espressif/arduino-esp32](https://github.com/espressif/arduino-esp32) |
 | CP210x USB-to-UART driver | Lets Windows recognize the ESP32 as a COM port | [Silicon Labs CP210x VCP drivers](https://www.silabs.com/developer-tools/usb-to-uart-bridge-vcp-drivers) |
 | 7-Zip | Extracts the hashcat release archive (`.7z`) | [7-zip.org](https://www.7-zip.org/) |
 | hashcat | Offline password cracking against the captured hash | [hashcat.net/beta](https://hashcat.net/beta/) |
+| CUDA Toolkit *(optional, NVIDIA GPUs only — see [Step 7](#step-7--crack-it) Gotcha 3)* | Lets hashcat use its faster CUDA backend instead of falling back to OpenCL. Must be a version **at or below** what `nvidia-smi` reports as the driver's supported CUDA version | [developer.nvidia.com/cuda-toolkit-archive](https://developer.nvidia.com/cuda-toolkit-archive) |
 | hcxtools *(optional — see [Step 3](#step-3--convert-the-capture-to-hashcats-format))* | Converts `.pcap` → hashcat's `.hc22000` format | [github.com/ZerBea/hcxtools](https://github.com/ZerBea/hcxtools) (via WSL) |
 | WSL2 + Ubuntu *(optional, only for the hcxtools route)* | Runs Linux-only tooling on Windows | [learn.microsoft.com/windows/wsl/install](https://learn.microsoft.com/en-us/windows/wsl/install) |
 | Wordlist | Dictionary attack input | [rockyou.txt](https://github.com/brannondorsey/naive-hashcat/releases/download/data/rockyou.txt) — ~14M passwords from a public breach corpus |
@@ -143,19 +156,19 @@ where the GUI and the commands in this doc expect them by default.
 ## Project Structure
 
 ```
-esp32-wifi/
+MarauderZ/
 ├── README.md                       # this file - rendered on GitHub, canonical copy
-├── docs/
-│   ├── HANDSHAKE_TUTORIAL.md        # Linux / Raspberry Pi workflow
-│   └── WINDOWS_HANDSHAKE_TUTORIAL.md   # detailed copy of this file
 ├── firmware/
 │   ├── MarauderZ_sniffer/
 │   │   └── MarauderZ_sniffer.ino         # main sketch: scan, deauth, PMKID capture, serial EAPOL dump
 │   └── deauth_only/
 │       └── deauth_only.ino          # deauth-only variant
-├── capture_handshake.py             # CLI: interactive serial capture -> captures/handshake.pcap
+├── MarauderZ_CLI.py                 # CLI: interactive serial capture -> captures/handshake.pcap
 ├── list_hc22000.py                  # CLI: lists BSSID/ESSID of every entry in a .hc22000 file
-├── gui.py                           # GUI: wraps every step below behind buttons/browse dialogs
+├── MarauderZ_GUI.py                 # GUI: wraps every step below behind buttons/browse dialogs
+├── MarauderZ.exe                    # prebuilt GUI - no Python install needed, see "GUI vs CLI" above
+├── build_exe.ps1 / build_exe.bat    # rebuilds MarauderZ.exe from MarauderZ_GUI.py after edits
+├── photos/                          # logo.ico/logo.png (exe icon + in-app header) and reference photos
 ├── downloads/                       # gitignored - third-party downloads (see above)
 │   ├── hashcat-*version*/
 │   └── rockyou.txt
@@ -169,8 +182,8 @@ esp32-wifi/
 gitignored working folders for things you download (hashcat, the
 wordlist) and things you generate by running the tool (captures, cracked
 passwords). Both are created automatically the first time you run
-`gui.py`, so a freshly cloned copy of this repo doesn't need them
-pre-created.
+`MarauderZ_GUI.py`, so a freshly cloned copy of this repo doesn't need
+them pre-created.
 
 ## Step 1 — Flash the Sketch
 
@@ -219,13 +232,13 @@ the serial session — requires the current sketch (see
 [Step 1](#step-1--flash-the-sketch)).*
 
 ```powershell
-python capture_handshake.py *your-com-port* 115200 captures\handshake.pcap
+python MarauderZ_CLI.py *your-com-port* 115200 captures\handshake.pcap
 ```
 
 All three arguments are optional and already default to `COM30`,
 `115200`, and `captures\handshake.pcap` (edit the defaults near the top
-of `capture_handshake.py` to match *your-com-port*), so
-`python capture_handshake.py` with no arguments works out of the box on
+of `MarauderZ_CLI.py` to match *your-com-port*), so
+`python MarauderZ_CLI.py` with no arguments works out of the box on
 a matching setup.
 
 The ESP32's live scan results print to the terminal, e.g.:
@@ -345,18 +358,35 @@ cd downloads
 
 ## Step 7 — Crack It
 
-*GUI: "5. Crack" tab — browse to hashcat.exe, the hash file, and the
-wordlist, then click Start Cracking. The two gotchas below are already
+*GUI: "5. Crack" tab — browse to hashcat.exe and the hash file, pick an
+attack mode, then click Start Cracking. The two gotchas below are already
 handled for you (it runs from the right folder automatically, and
 streams output live instead of hanging). Once done, "Save cracked.txt
 As..." saves a copy wherever you like and automatically loads that same
 path into the Results tab. When the run finishes, a popup and a large
 result banner in the tab itself immediately show either the recovered
-password or "No password found in the wordlist" — this checks
-`hashcat --show` under the hood, so it's correct even when the password
-was already cracked in an earlier run (hashcat's potfile shortcut skips
-writing `-o` in that case, but the GUI catches it and reports/saves the
-result anyway) — no need to dig through the log.*
+password or "No password found" — this checks `hashcat --show` under the
+hood, so it's correct even when the password was already cracked in an
+earlier run (hashcat's potfile shortcut skips writing `-o` in that case,
+but the GUI catches it and reports/saves the result anyway) — no need to
+dig through the log.*
+
+*GUI extras beyond the raw CLI:*
+- ***Attack mode*** *— Dictionary (`-a 0`, wordlist) or Mask / brute-force
+  (`-a 3`). Mask mode has a "Starts with 9" quick preset and a
+  "Rules / Mask Help..." button that opens a full reference (mask
+  character classes, custom charsets, example phone-number-style masks,
+  `--increment`) in a resizable, scrollable popup.*
+- ***GPU/device (-d)*** *— click "Detect Devices" to list every backend
+  hashcat sees and auto-select a discrete NVIDIA GPU over a slower Intel
+  iGPU (it also de-duplicates the same physical GPU showing up twice,
+  once per CUDA/OpenCL backend).*
+- ***Estimate Time...*** *— computes the keyspace from your current mask
+  (or wordlist line count), benchmarks the selected device, and shows a
+  plain-English ETA before you commit to a run.*
+- ***Live progress*** *— a progress bar plus GPU status line (device,
+  utilization, speed) update every 5 seconds while cracking, driven by
+  hashcat's own `--status` output.*
 
 > **Gotcha 1:** run `hashcat.exe` from *inside its own extracted folder*.
 > It resolves its `OpenCL\` and `kernels\` directories relative to the
@@ -367,6 +397,19 @@ result anyway) — no need to dig through the log.*
 > **Gotcha 2:** redirect output to a log file with `>` rather than piping
 > through `head`/`Select-Object -First`. hashcat's live status screen can
 > appear to hang indefinitely when piped.
+>
+> **Gotcha 3 (GPU cracking specifically):** hashcat's fast CUDA backend
+> needs a matching **CUDA Toolkit** version installed separately from the
+> NVIDIA driver — check `nvidia-smi`'s reported "CUDA Version" and install
+> a **CUDA Toolkit release at or below that version** from
+> [developer.nvidia.com/cuda-toolkit-archive](https://developer.nvidia.com/cuda-toolkit-archive)
+> (a newer Toolkit than the driver supports fails with
+> `Unsupported .version X.X; current version is 'Y.Y'`). Without it,
+> hashcat falls back to the slower OpenCL backend automatically — still
+> works, just not as fast. If a run then fails with `Not enough
+> allocatable device memory or free host memory for mapping`, that's
+> usually low free system RAM (not GPU memory) — close other
+> memory-heavy apps and retry.
 
 ```powershell
 cd downloads\hashcat-*version*
@@ -415,7 +458,7 @@ type ..\..\captures\cracked.txt
 
 ```powershell
 # 1. Capture
-python capture_handshake.py
+python MarauderZ_CLI.py
 
 # 2. Convert (via hashcat.net cap2hashcat) -> captures\*your-hash-file*.hc22000
 
@@ -471,6 +514,13 @@ random passphrase not derived from any dictionary word.
   overwriting it. Use [Step 4](#step-4--inspect-the-hash-file) and
   [Step 5](#step-5--isolate-your-target-only-if-multiple-ssids-are-present)
   to isolate your target before cracking.
+- **hashcat is using the slow Intel iGPU instead of the NVIDIA GPU** — in
+  the GUI's Crack tab, click "Detect Devices" and pick the entry starting
+  with `NVIDIA`/`GeForce`/`RTX`/`GTX` explicitly (it's usually
+  auto-selected, but not if detection hasn't been run yet). The same
+  physical NVIDIA GPU can legitimately appear once per backend (CUDA and
+  its OpenCL fallback) in raw `hashcat -I` output — the GUI's device list
+  already de-duplicates that.
 
 ## Cleanup
 
