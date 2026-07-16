@@ -118,7 +118,7 @@ point, not any implementation flaw in WPA2.
 | ESP32 Arduino core | Board support package for Arduino CLI | [github.com/espressif/arduino-esp32](https://github.com/espressif/arduino-esp32) |
 | CP210x USB-to-UART driver | Lets Windows recognize the ESP32 as a COM port | [Silicon Labs CP210x VCP drivers](https://www.silabs.com/developer-tools/usb-to-uart-bridge-vcp-drivers) |
 | 7-Zip | Extracts the hashcat release archive (`.7z`) | [7-zip.org](https://www.7-zip.org/) |
-| hashcat | Offline password cracking against the captured hash | [hashcat.net/hashcat](https://hashcat.net/hashcat/) |
+| hashcat | Offline password cracking against the captured hash | [hashcat.net/beta](https://hashcat.net/beta/) |
 | hcxtools *(optional — see [Step 3](#step-3--convert-the-capture-to-hashcats-format))* | Converts `.pcap` → hashcat's `.hc22000` format | [github.com/ZerBea/hcxtools](https://github.com/ZerBea/hcxtools) (via WSL) |
 | WSL2 + Ubuntu *(optional, only for the hcxtools route)* | Runs Linux-only tooling on Windows | [learn.microsoft.com/windows/wsl/install](https://learn.microsoft.com/en-us/windows/wsl/install) |
 | Wordlist | Dictionary attack input | [rockyou.txt](https://github.com/brannondorsey/naive-hashcat/releases/download/data/rockyou.txt) — ~14M passwords from a public breach corpus |
