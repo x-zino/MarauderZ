@@ -34,15 +34,23 @@ LINKTYPE_IEEE802_11 = 105
 
 # When frozen by PyInstaller, __file__ resolves inside the onefile temp
 # extraction dir (a fresh path every run), not the folder the .exe lives
-# in - so captures/downloads/photos must anchor on sys.executable instead.
+# in - so captures/downloads/firmware must anchor on sys.executable instead
+# (they're user-writable/next-to-the-exe by design). photos/ is different:
+# it's read-only branding (logo.ico/logo.png) that must work even if someone
+# only has the standalone exe (downloaded from a GitHub release, sent as a
+# single file, etc.) with no photos/ folder alongside it - so it's bundled
+# into the exe itself (see build_exe.ps1's --add-data) and read back from
+# PyInstaller's onefile extraction dir (sys._MEIPASS) instead.
 if getattr(sys, "frozen", False):
     PROJECT_DIR = Path(sys.executable).resolve().parent
+    ASSETS_DIR = Path(getattr(sys, "_MEIPASS", PROJECT_DIR))
 else:
     PROJECT_DIR = Path(__file__).resolve().parent
+    ASSETS_DIR = PROJECT_DIR
 FIRMWARE_DIR = PROJECT_DIR / "firmware"
 DOWNLOADS_DIR = PROJECT_DIR / "downloads"   # third-party downloads: hashcat, rockyou.txt
 CAPTURES_DIR = PROJECT_DIR / "captures"     # your own run output: pcap, hc22000, cracked.txt
-PHOTOS_DIR = PROJECT_DIR / "photos"
+PHOTOS_DIR = ASSETS_DIR / "photos"
 
 # These hold your own capture data / downloaded tools, not source - see
 # .gitignore. Created here so the GUI's default save/open paths always
@@ -50,10 +58,131 @@ PHOTOS_DIR = PROJECT_DIR / "photos"
 CAPTURES_DIR.mkdir(exist_ok=True)
 DOWNLOADS_DIR.mkdir(exist_ok=True)
 
+MASK_HELP_TEXT = r"""MASK / BRUTE-FORCE (-a 3) CHARACTER SETS
+==========================================
+?l  lowercase letters        a-z
+?u  uppercase letters        A-Z
+?d  digits                   0-9
+?s  special characters       !"#$%&'()*+,-./:;<=>?@[\]^_`{|}~ (and space)
+?a  all of the above         ?l?u?d?s
+?b  every byte value         0x00 - 0xff
+
+Each ?X in your mask = one character position using that set.
+Example: ?d?d?d?d = a 4-digit brute-force (0000-9999).
+
+CUSTOM CHARSETS (-1 -2 -3 -4)
+==========================================
+Define your own character set and reference it as ?1 / ?2 / ?3 / ?4 in the
+mask. Put these in "Extra hashcat args" alongside the mask.
+
+  -1 123456789
+  mask: ?1?d?d?d?d?d?d?d?d?d
+     -> 10-digit number where the FIRST digit can't be 0
+
+  -1 0123456789 -2 123456789
+  mask: 9?2?1?1?1?1?1?1?1?1
+     -> starts with 9, second digit 1-9, rest 0-9
+
+EXAMPLE MASKS FOR PHONE-NUMBER STYLE BRUTE FORCE
+==========================================
+?d?d?d?d?d?d?d?d?d?d        any 10-digit number (10,000,000,000 combos)
+9?d?d?d?d?d?d?d?d?d         10-digit, starts with 9   (1,000,000,000 combos)
+8?d?d?d?d?d?d?d?d?d         10-digit, starts with 8
+98765?d?d?d?d?d              fix a known 5-digit prefix, brute the rest
+                              (100,000 combos - seconds instead of hours)
+
+Every fixed digit divides the remaining keyspace (and time) by 10 - the
+biggest speed win comes from knowing any part of the real number, not from
+GPU power.
+
+MASK LENGTH / POSITION SYNTAX
+==========================================
+Each position in the mask = one character. A 10-digit mask needs 10 ?d
+tokens. You can mix literal characters with ?X tokens, e.g. 555?d?d?d?d?d?d?d
+fixes an area code "555" then brutes the remaining 7 digits.
+
+--increment / --increment-min / --increment-max
+==========================================
+Tries shorter masks first, from --increment-min up to the mask's full length.
+Put in "Extra hashcat args":
+
+  --increment --increment-min 8 --increment-max 10
+     -> with mask ?d?d?d?d?d?d?d?d?d?d, tries all 8-digit numbers, then
+        9-digit, then 10-digit
+
+OTHER ATTACK MODES (for reference - this GUI only exposes -a 0 / -a 3)
+==========================================
+-a 0   Dictionary   - wordlist of candidate passwords
+-a 3   Mask         - brute-force using the character sets above
+-a 6   Hybrid       - wordlist word + mask appended   (word + ?d?d?d?d)
+-a 7   Hybrid       - mask + wordlist word appended   (?d?d?d?d + word)
+
+USEFUL EXTRA HASHCAT FLAGS (put in "Extra hashcat args")
+==========================================
+-O                     optimized kernel, needs less GPU memory
+                        (safe here since phone-number masks are well under
+                        its ~32-char password-length limit)
+-w 1..4                workload profile; higher = more aggressive/hotter
+--runtime=N             auto-stop after N seconds (handy for a quick test)
+-r rules\best64.rule   apply a rule file to mutate wordlist entries
+                        (dictionary mode only, not mask mode)
+"""
+
 
 # --------------------------------------------------------------------------
 # Shared helpers
 # --------------------------------------------------------------------------
+
+_MASK_CHARSET_SIZES = {"l": 26, "u": 26, "d": 10, "s": 33, "a": 95, "b": 256}
+
+
+def mask_keyspace(mask: str, custom_charsets=None):
+    """Total candidate count for a hashcat mask, e.g. '?d?d?d?d' -> 10000.
+    custom_charsets maps '1'-'4' to the literal charset string defined by
+    -1/-2/-3/-4 (only their length matters here)."""
+    custom_charsets = custom_charsets or {}
+    total = 1
+    i = 0
+    while i < len(mask):
+        if mask[i] == "?" and i + 1 < len(mask):
+            token = mask[i + 1]
+            if token in _MASK_CHARSET_SIZES:
+                total *= _MASK_CHARSET_SIZES[token]
+                i += 2
+                continue
+            if token in custom_charsets:
+                total *= max(len(custom_charsets[token]), 1)
+                i += 2
+                continue
+        i += 1
+    return total
+
+
+def parse_hashrate(text: str):
+    """Parses a hashcat speed string like '199.6 kH/s' into a plain H/s
+    float, or None if it doesn't look like one."""
+    m = re.match(r"([\d.,]+)\s*(\S?)H/s", text.strip())
+    if not m:
+        return None
+    value = float(m.group(1).replace(",", ""))
+    mult = {"": 1, "k": 1e3, "m": 1e6, "g": 1e9, "t": 1e12}.get(m.group(2).lower(), 1)
+    return value * mult
+
+
+def format_duration(seconds: float) -> str:
+    if seconds < 60:
+        return f"{seconds:.1f} seconds"
+    minutes = seconds / 60
+    if minutes < 60:
+        return f"{minutes:.1f} minutes"
+    hours = minutes / 60
+    if hours < 24:
+        return f"{hours:.1f} hours"
+    days = hours / 24
+    if days < 365:
+        return f"{days:.1f} days"
+    return f"{days / 365.25:.1f} years"
+
 
 def write_pcap_header(f):
     f.write(struct.pack("<IHHiIII", PCAP_MAGIC, 2, 4, 0, 0, 262144, LINKTYPE_IEEE802_11))
@@ -138,14 +267,33 @@ class LogPanel(ttk.Frame):
         self.after(80, self._drain)
 
 
-def run_streaming(cmd, log: LogPanel, cwd=None, on_done=None, shell=False):
+def hashcat_env():
+    """Copy of os.environ with any installed CUDA Toolkit's bin/bin\\x64 dirs
+    prepended to PATH. nvrtc*.dll (needed for hashcat's fast CUDA backend)
+    lives in bin\\x64, and a process started before/without a fresh
+    login won't see a PATH update the installer made - without this,
+    hashcat silently falls back to the slower OpenCL backend or fails
+    with 'CUDA SDK Toolkit not installed or incorrectly installed'
+    even right after installing it."""
+    env = os.environ.copy()
+    cuda_root = Path(r"C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA")
+    if cuda_root.is_dir():
+        for v in sorted((d for d in cuda_root.iterdir() if d.is_dir()), reverse=True):
+            bin_x64 = v / "bin" / "x64"
+            if bin_x64.is_dir():
+                env["PATH"] = f"{bin_x64}{os.pathsep}{v / 'bin'}{os.pathsep}{env.get('PATH', '')}"
+                break
+    return env
+
+
+def run_streaming(cmd, log: LogPanel, cwd=None, on_done=None, shell=False, env=None):
     """Runs cmd in a background thread, streaming stdout/stderr into log."""
 
     def worker():
         log.log(f"$ {cmd if isinstance(cmd, str) else ' '.join(cmd)}")
         try:
             proc = subprocess.Popen(
-                cmd, cwd=cwd, shell=shell,
+                cmd, cwd=cwd, shell=shell, env=env,
                 stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                 text=True, bufsize=1,
             )
@@ -179,6 +327,38 @@ def browse_dir(entry: tk.Entry):
     if path:
         entry.delete(0, tk.END)
         entry.insert(0, path)
+
+
+class ScrollableTab(ttk.Frame):
+    """Wraps a tab-content frame in a canvas + vertical scrollbar, so any
+    tab whose content is taller than the window still has everything
+    reachable instead of getting clipped at the bottom. Used for every
+    notebook tab (see App.__init__) rather than resizing widgets down or
+    forcing the window itself to grow to fit the tallest tab."""
+
+    def __init__(self, master, tab_cls, *args, **kwargs):
+        super().__init__(master)
+        canvas = tk.Canvas(self, highlightthickness=0)
+        vbar = ttk.Scrollbar(self, orient="vertical", command=canvas.yview)
+        canvas.configure(yscrollcommand=vbar.set)
+        canvas.pack(side="left", fill="both", expand=True)
+        vbar.pack(side="right", fill="y")
+
+        self.inner = tab_cls(canvas, *args, **kwargs)
+        window_id = canvas.create_window((0, 0), window=self.inner, anchor="nw")
+
+        self.inner.bind(
+            "<Configure>", lambda _e: canvas.configure(scrollregion=canvas.bbox("all")))
+        canvas.bind("<Configure>", lambda e: canvas.itemconfig(window_id, width=e.width))
+
+        def on_mousewheel(event):
+            canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
+
+        # Only hijack the mouse wheel while the pointer is actually over
+        # this tab's canvas - bind_all is global, so without this a tab
+        # created later would steal wheel-scroll from every earlier tab.
+        canvas.bind("<Enter>", lambda _e: canvas.bind_all("<MouseWheel>", on_mousewheel))
+        canvas.bind("<Leave>", lambda _e: canvas.unbind_all("<MouseWheel>"))
 
 
 # --------------------------------------------------------------------------
@@ -798,48 +978,99 @@ class CrackTab(ttk.Frame):
                                                 initialdir=str(CAPTURES_DIR))
                    ).grid(row=3, column=1)
 
-        ttk.Label(self, text="Wordlist:").grid(row=4, column=0, sticky="w", pady=(10, 0))
+        ttk.Label(self, text="Attack mode:").grid(row=4, column=0, sticky="w", pady=(10, 0))
+        mode_frame = ttk.Frame(self)
+        mode_frame.grid(row=5, column=0, columnspan=2, sticky="w")
+        self.attack_mode = tk.StringVar(value="dict")
+        ttk.Radiobutton(mode_frame, text="Dictionary (-a 0, wordlist)", variable=self.attack_mode,
+                         value="dict", command=self._update_mode).pack(side="left", padx=(0, 15))
+        ttk.Radiobutton(mode_frame, text="Mask / brute-force (-a 3)", variable=self.attack_mode,
+                         value="mask", command=self._update_mode).pack(side="left")
+
+        ttk.Label(self, text="Wordlist:").grid(row=6, column=0, sticky="w", pady=(10, 0))
         self.wordlist_entry = ttk.Entry(self, width=55)
         self.wordlist_entry.insert(0, str(DOWNLOADS_DIR / "rockyou.txt"))
-        self.wordlist_entry.grid(row=5, column=0, sticky="we", padx=(0, 5))
-        ttk.Button(self, text="Browse...",
-                   command=lambda: browse_file(self.wordlist_entry,
-                                                filetypes=(("Text files", "*.txt"), ("All files", "*.*")),
-                                                initialdir=str(DOWNLOADS_DIR))
-                   ).grid(row=5, column=1)
+        self.wordlist_entry.grid(row=7, column=0, sticky="we", padx=(0, 5))
+        self.wordlist_browse_btn = ttk.Button(
+            self, text="Browse...",
+            command=lambda: browse_file(self.wordlist_entry,
+                                         filetypes=(("Text files", "*.txt"), ("All files", "*.*")),
+                                         initialdir=str(DOWNLOADS_DIR)))
+        self.wordlist_browse_btn.grid(row=7, column=1)
 
-        ttk.Label(self, text="Output file:").grid(row=6, column=0, sticky="w", pady=(10, 0))
+        ttk.Label(self, text="Mask (?d=digit ?l=lower ?u=upper ?s=symbol ?a=all):").grid(
+            row=8, column=0, sticky="w", pady=(10, 0))
+        self.mask_entry = ttk.Entry(self, width=55, state="disabled")
+        self.mask_entry.grid(row=9, column=0, sticky="we", padx=(0, 5))
+        preset_frame = ttk.Frame(self)
+        preset_frame.grid(row=9, column=1)
+        self.mask_preset9_btn = ttk.Button(preset_frame, text="Starts with 9", state="disabled",
+                                            command=self._insert_phone9_mask)
+        self.mask_preset9_btn.pack(side="left")
+        ttk.Button(preset_frame, text="Rules / Mask Help...", command=self.show_mask_help).pack(
+            side="left", padx=(3, 0))
+
+        ttk.Label(self, text="GPU/device (-d):").grid(row=10, column=0, sticky="w", pady=(10, 0))
+        device_frame = ttk.Frame(self)
+        device_frame.grid(row=11, column=0, columnspan=2, sticky="we")
+        self.device_var = tk.StringVar(value="Auto (let hashcat choose)")
+        self.device_combo = ttk.Combobox(device_frame, textvariable=self.device_var, width=48, state="readonly")
+        self.device_combo["values"] = ("Auto (let hashcat choose)",)
+        self.device_combo.pack(side="left", padx=(0, 5))
+        ttk.Button(device_frame, text="Detect Devices", command=self.detect_devices).pack(side="left")
+
+        ttk.Label(self, text="Output file:").grid(row=12, column=0, sticky="w", pady=(10, 0))
         self.out_entry = ttk.Entry(self, width=55, textvariable=self.cracked_var)
-        self.out_entry.grid(row=7, column=0, sticky="we", padx=(0, 5))
+        self.out_entry.grid(row=13, column=0, sticky="we", padx=(0, 5))
         ttk.Button(self, text="Browse...",
                    command=lambda: browse_file(self.out_entry, save=True,
                                                 filetypes=(("Text files", "*.txt"), ("All files", "*.*")),
                                                 initialfile="cracked.txt",
                                                 initialdir=str(CAPTURES_DIR))
-                   ).grid(row=7, column=1)
+                   ).grid(row=13, column=1)
 
         ttk.Label(self, text="Extra hashcat args (optional, e.g. -r rules\\best64.rule):").grid(
-            row=8, column=0, sticky="w", pady=(10, 0))
+            row=14, column=0, sticky="w", pady=(10, 0))
         self.extra_entry = ttk.Entry(self, width=55)
-        self.extra_entry.grid(row=9, column=0, sticky="we")
+        self.extra_entry.grid(row=15, column=0, sticky="we")
 
         btns = ttk.Frame(self)
-        btns.grid(row=10, column=0, columnspan=2, pady=10, sticky="w")
+        btns.grid(row=16, column=0, columnspan=2, pady=10, sticky="w")
         self.start_btn = ttk.Button(btns, text="Start Cracking", command=self.start_crack)
         self.start_btn.pack(side="left", padx=(0, 5))
         self.stop_btn = ttk.Button(btns, text="Stop", command=self.stop_crack, state="disabled")
         self.stop_btn.pack(side="left", padx=5)
         ttk.Button(btns, text="Show Cracked (--show)", command=self.show_cracked).pack(side="left", padx=5)
         ttk.Button(btns, text="Save cracked.txt As...", command=self.save_as).pack(side="left", padx=5)
+        self.estimate_btn = ttk.Button(btns, text="Estimate Time...", command=self.estimate_time)
+        self.estimate_btn.pack(side="left", padx=5)
+
+        self.progress_var = tk.DoubleVar(value=0.0)
+        self.progress_bar = ttk.Progressbar(self, orient="horizontal", mode="determinate",
+                                             maximum=100, variable=self.progress_var)
+        self.progress_bar.grid(row=17, column=0, columnspan=2, sticky="we", pady=(10, 0))
+
+        self.progress_text_var = tk.StringVar(value="Progress: -- | Remaining: -- | Finishes: --")
+        ttk.Label(self, textvariable=self.progress_text_var).grid(
+            row=18, column=0, columnspan=2, sticky="w")
+        self._last_progress = (0, 0, 0.0)
+        self._last_eta = ("", "")
+
+        self.gpu_status_var = tk.StringVar(value="GPU status: not running yet.")
+        self.gpu_status_label = ttk.Label(self, textvariable=self.gpu_status_var,
+                                           font=("Consolas", 10))
+        self.gpu_status_label.grid(row=19, column=0, columnspan=2, sticky="w", pady=(0, 5))
+        self._status_queue: "queue.Queue[tuple]" = queue.Queue()
+        self.after(300, self._drain_gpu_status)
 
         self.result_var = tk.StringVar(value="")
         self.result_label = ttk.Label(self, textvariable=self.result_var,
                                        font=("Segoe UI", 18, "bold"), foreground="#0a7d1f")
-        self.result_label.grid(row=11, column=0, columnspan=2, sticky="w", pady=(0, 5))
+        self.result_label.grid(row=20, column=0, columnspan=2, sticky="w", pady=(0, 5))
 
         self.log = LogPanel(self)
-        self.log.grid(row=12, column=0, columnspan=2, sticky="nsew")
-        self.rowconfigure(12, weight=1)
+        self.log.grid(row=21, column=0, columnspan=2, sticky="nsew")
+        self.rowconfigure(21, weight=1)
         self.columnconfigure(0, weight=1)
 
     def _hashcat_paths(self):
@@ -856,29 +1087,223 @@ class CrackTab(ttk.Frame):
         exe_abs = str(Path(exe).resolve())
         return exe_abs, str(Path(exe_abs).parent)
 
+    def _update_mode(self):
+        if self.attack_mode.get() == "dict":
+            self.wordlist_entry.configure(state="normal")
+            self.wordlist_browse_btn.configure(state="normal")
+            self.mask_entry.configure(state="disabled")
+            self.mask_preset9_btn.configure(state="disabled")
+        else:
+            self.wordlist_entry.configure(state="disabled")
+            self.wordlist_browse_btn.configure(state="disabled")
+            self.mask_entry.configure(state="normal")
+            self.mask_preset9_btn.configure(state="normal")
+
+    def _insert_phone9_mask(self):
+        self.mask_entry.delete(0, tk.END)
+        self.mask_entry.insert(0, "9" + "?d" * 9)
+
+    def show_mask_help(self):
+        """Reference popup for mask syntax and other hashcat brute-force
+        knobs - a resizable window with a scrollbar since the reference
+        text is long. Kept as a separate Toplevel (not squeezed into the
+        main tab) so it can be left open side-by-side while editing masks."""
+        win = tk.Toplevel(self)
+        win.title("Mask / Brute-force Rules Reference")
+        win.geometry("700x520")
+        win.minsize(420, 300)
+
+        text = scrolledtext.ScrolledText(win, wrap="word", font=("Consolas", 9))
+        text.pack(fill="both", expand=True, padx=8, pady=8)
+        text.insert("1.0", MASK_HELP_TEXT)
+        text.configure(state="disabled")
+
+        ttk.Button(win, text="Close", command=win.destroy).pack(pady=(0, 8))
+
+    def _get_custom_charsets(self):
+        """Pulls -1/-2/-3/-4 custom charset definitions out of the Extra
+        hashcat args field, e.g. '-1 123456789' -> {'1': '123456789'},
+        so mask_keyspace() can size ?1-?4 tokens correctly."""
+        extra = self.extra_entry.get()
+        return {m.group(1): m.group(2) for m in re.finditer(r"-([1-4])\s+(\S+)", extra)}
+
+    def estimate_time(self):
+        """Computes the keyspace for the current mask (or wordlist line
+        count for dictionary mode), benchmarks the selected device for
+        this hash mode, and shows the estimated time to try every
+        candidate - the direct answer to 'how long will this take'."""
+        exe_abs, hc_dir = self._hashcat_paths()
+        if exe_abs is None:
+            return
+
+        if self.attack_mode.get() == "mask":
+            mask = self.mask_entry.get().strip()
+            if not mask:
+                messagebox.showerror("No mask", "Enter a mask first (or click 'Starts with 9').")
+                return
+            keyspace = mask_keyspace(mask, self._get_custom_charsets())
+            keyspace_desc = f"mask '{mask}'"
+        else:
+            wordlist = self.wordlist_entry.get().strip()
+            if not wordlist or not os.path.isfile(wordlist):
+                messagebox.showerror("Wordlist not found", "Browse to a valid wordlist first.")
+                return
+            self.log.log(f"Counting lines in {wordlist} for the time estimate...")
+            with open(wordlist, "rb") as f:
+                keyspace = sum(1 for _ in f)
+            keyspace_desc = f"wordlist ({keyspace:,} lines)"
+
+        device_sel = self.device_var.get().strip()
+        bench_cmd = [exe_abs, "-b", "-m", "22000"]
+        if device_sel and not device_sel.startswith("Auto"):
+            bench_cmd += ["-d", device_sel.split(":", 1)[0].strip()]
+
+        self.estimate_btn.configure(state="disabled")
+        self.gpu_status_var.set("GPU status: benchmarking for time estimate, please wait...")
+        self.log.log(f"$ {' '.join(bench_cmd)}   (cwd={hc_dir})")
+
+        def worker():
+            hs, raw = None, ""
+            try:
+                r = subprocess.run(bench_cmd, cwd=hc_dir, env=hashcat_env(),
+                                    capture_output=True, text=True, timeout=60)
+                raw = r.stdout + r.stderr
+                m = self._SPEED_RE.search(raw)
+                if m:
+                    hs = parse_hashrate(m.group(2))
+            except Exception as e:
+                raw = str(e)
+            self.after(0, lambda: self._show_estimate(keyspace, keyspace_desc, hs, raw))
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _show_estimate(self, keyspace, keyspace_desc, hashrate, raw_output):
+        self.estimate_btn.configure(state="normal")
+        if not hashrate:
+            self.gpu_status_var.set("GPU status: benchmark failed.")
+            self.log.log(raw_output)
+            messagebox.showerror("Benchmark failed",
+                                  "Couldn't get a speed reading from hashcat's benchmark. "
+                                  "See the log for the raw output.")
+            return
+        self.gpu_status_var.set(f"GPU status: benchmarked at {hashrate:,.0f} H/s")
+        seconds = keyspace / hashrate
+        msg = (f"Keyspace: {keyspace:,} candidates ({keyspace_desc})\n"
+               f"Benchmarked speed: {hashrate:,.0f} H/s\n\n"
+               f"Estimated time to try every candidate:\n{format_duration(seconds)}\n\n"
+               f"(Could finish sooner if the password is found early; actual speed "
+               f"may vary with GPU temperature/throttling.)")
+        self.log.log(msg.replace("\n", "  "))
+        messagebox.showinfo("Time Estimate", msg)
+
+    def detect_devices(self):
+        """Runs 'hashcat -I' to list backend devices and populates the
+        dropdown as 'id: name'. Auto-selects the first device whose name
+        contains 'NVIDIA'/'GeForce'/'RTX'/'GTX' so a discrete GPU is
+        preferred over an Intel iGPU without the user having to know
+        hashcat's device numbering.
+
+        The same physical NVIDIA GPU is listed once per backend (CUDA and
+        its OpenCL fallback), cross-referenced via '(Alias: #N)' in hashcat's
+        own output - e.g. 'Backend Device ID #01 (Alias: #02)' for the CUDA
+        entry and 'Backend Device ID #02 (Alias: #01)' for its OpenCL twin.
+        Without resolving that, the RTX 3050 shows up twice in the list.
+        We keep only the first-seen id for each alias pair (CUDA is always
+        printed first by hashcat, so that's the faster one that gets kept)."""
+        exe_abs, hc_dir = self._hashcat_paths()
+        if exe_abs is None:
+            return
+        try:
+            r = subprocess.run([exe_abs, "-I"], cwd=hc_dir, capture_output=True,
+                                text=True, timeout=30, env=hashcat_env())
+        except Exception as e:
+            messagebox.showerror("Detect failed", str(e))
+            return
+
+        raw = []
+        for chunk in re.split(r"Backend Device ID #", r.stdout)[1:]:
+            id_match = re.match(r"(\d+)", chunk.strip())
+            alias_match = re.search(r"Alias:\s*#(\d+)", chunk[:80])
+            name_match = re.search(r"Name\.*:\s*(.+)", chunk)
+            if id_match and name_match:
+                raw.append((id_match.group(1), name_match.group(1).strip(),
+                            alias_match.group(1) if alias_match else None))
+
+        devices = []
+        seen_ids = set()
+        for did, name, alias in raw:
+            if alias and alias in seen_ids:
+                continue
+            devices.append((did, name))
+            seen_ids.add(did)
+
+        if not devices:
+            messagebox.showwarning("No devices found",
+                                    "hashcat -I didn't report any backend devices. "
+                                    "See the log for its raw output.")
+            self.log.log(r.stdout)
+            self.log.log(r.stderr)
+            return
+
+        labels = ["Auto (let hashcat choose)"] + [f"{did}: {name}" for did, name in devices]
+        self.device_combo["values"] = labels
+
+        nvidia_label = next(
+            (lbl for lbl, (_, name) in zip(labels[1:], devices)
+             if any(k in name.upper() for k in ("NVIDIA", "GEFORCE", "RTX", "GTX"))),
+            None,
+        )
+        self.device_var.set(nvidia_label or labels[0])
+        self.log.log("Detected devices:\n" + "\n".join(f"  {lbl}" for lbl in labels[1:]))
+        if not nvidia_label:
+            self.log.log("No NVIDIA device detected - check that the NVIDIA driver "
+                          "(and CUDA, for the fastest backend) is installed.")
+
     def start_crack(self):
         exe_abs, hc_dir = self._hashcat_paths()
         if exe_abs is None:
             return
         hash_file = self.hash_entry.get().strip()
-        wordlist = self.wordlist_entry.get().strip()
         out_file = self.out_entry.get().strip()
         if not hash_file or not os.path.isfile(hash_file):
             messagebox.showerror("Hash file not found", "Browse to a valid hash file.")
             return
-        if not wordlist or not os.path.isfile(wordlist):
-            messagebox.showerror("Wordlist not found", "Browse to a valid wordlist.")
-            return
 
-        cmd = [exe_abs, "-m", "22000", os.path.abspath(hash_file), os.path.abspath(wordlist)]
+        cmd = [exe_abs, "-m", "22000", os.path.abspath(hash_file)]
+        if self.attack_mode.get() == "dict":
+            wordlist = self.wordlist_entry.get().strip()
+            if not wordlist or not os.path.isfile(wordlist):
+                messagebox.showerror("Wordlist not found", "Browse to a valid wordlist.")
+                return
+            cmd += [os.path.abspath(wordlist)]
+        else:
+            mask = self.mask_entry.get().strip()
+            if not mask:
+                messagebox.showerror("Mask required",
+                                      "Enter a mask, e.g. ?d?d?d?d?d?d?d?d?d?d for a 10-digit number "
+                                      "(or click '10-digit phone').")
+                return
+            cmd += ["-a", "3", mask]
+
+        device_sel = self.device_var.get().strip()
+        if device_sel and not device_sel.startswith("Auto"):
+            cmd += ["-d", device_sel.split(":", 1)[0].strip()]
+
         if out_file:
             cmd += ["-o", os.path.abspath(out_file)]
         extra = self.extra_entry.get().strip()
+        if "--status" not in extra:
+            cmd += ["--status", "--status-timer=5"]
         if extra:
             cmd += extra.split()
 
         self.log.clear()
         self.result_var.set("")
+        self.gpu_status_var.set("GPU status: starting...")
+        self.progress_var.set(0.0)
+        self._last_progress = (0, 0, 0.0)
+        self._last_eta = ("", "")
+        self.progress_text_var.set("Progress: -- | Remaining: -- | Finishes: --")
         self.log.log("Note: running from inside the hashcat folder so it can find OpenCL/kernels.")
         self.start_btn.configure(state="disabled")
         self.stop_btn.configure(state="normal")
@@ -906,7 +1331,7 @@ class CrackTab(ttk.Frame):
         try:
             r = subprocess.run(
                 [exe_abs, "-m", "22000", os.path.abspath(hash_file), "--show"],
-                cwd=hc_dir, capture_output=True, text=True, timeout=60,
+                cwd=hc_dir, capture_output=True, text=True, timeout=60, env=hashcat_env(),
             )
             first_line = r.stdout.strip().splitlines()[0] if r.stdout.strip() else ""
             if first_line:
@@ -926,17 +1351,88 @@ class CrackTab(ttk.Frame):
             self.result_label.configure(foreground="#a00")
             messagebox.showwarning("Not cracked", "No password found in the wordlist for this network.")
 
+    _SPEED_RE = re.compile(r"Speed\.#(\d+)\.*:\s*([\d.,]+\s*\S?H/s)")
+    _HWMON_RE = re.compile(r"Hardware\.Mon\.#(\d+)\.*:\s*(.+)")
+    _PROGRESS_RE = re.compile(r"Progress\.*:\s*([\d,]+)/([\d,]+)\s*\(([\d.]+)%\)")
+    _ETA_RE = re.compile(r"Time\.Estimated\.*:\s*(.+)")
+
+    def _parse_gpu_status(self, line):
+        """Turns hashcat's own status-block lines (which the log panel
+        already shows verbatim, but easy to miss in the scroll) into the
+        progress bar, an ETA/remaining-time line, and a short line
+        confirming which device number is actually crunching - Hardware.
+        Mon/Speed lines only ever appear for the device(s) actually running
+        the attack, never for a device hashcat enumerated but skipped, so
+        there's no ambiguity like there would be parsing the startup
+        device banner. All of this only appears because start_crack()
+        always adds --status --status-timer=5 - without it hashcat never
+        prints these lines to a non-interactive (piped) process at all."""
+        m = self._HWMON_RE.search(line)
+        if m:
+            self._status_queue.put(("gpu", f"Device #{m.group(1)} running - {m.group(2).strip()}"))
+            return
+        m = self._SPEED_RE.search(line)
+        if m:
+            self._status_queue.put(("gpu", f"Device #{m.group(1)} speed: {m.group(2)}"))
+            return
+        m = self._PROGRESS_RE.search(line)
+        if m:
+            done = int(m.group(1).replace(",", ""))
+            total = int(m.group(2).replace(",", ""))
+            pct = float(m.group(3))
+            self._status_queue.put(("progress", (done, total, pct)))
+            return
+        m = self._ETA_RE.search(line)
+        if m:
+            text = m.group(1).strip()
+            idx = text.find("(")
+            if idx != -1 and text.endswith(")"):
+                eta_date, remaining = text[:idx].strip(), text[idx + 1:-1].strip()
+            else:
+                eta_date, remaining = text, ""
+            self._status_queue.put(("eta", (eta_date, remaining)))
+
+    def _refresh_progress_text(self):
+        done, total, pct = self._last_progress
+        eta_date, remaining = self._last_eta
+        text = f"Progress: {pct:.2f}%  ({done:,} / {total:,})"
+        if remaining:
+            text += f"  |  Remaining: {remaining}"
+        if eta_date:
+            text += f"  |  Finishes: {eta_date}"
+        self.progress_text_var.set(text)
+
+    def _drain_gpu_status(self):
+        latest_gpu = None
+        while True:
+            try:
+                kind, payload = self._status_queue.get_nowait()
+            except queue.Empty:
+                break
+            if kind == "gpu":
+                latest_gpu = payload
+            elif kind == "progress":
+                self._last_progress = payload
+                self.progress_var.set(payload[2])
+            elif kind == "eta":
+                self._last_eta = payload
+        if latest_gpu is not None:
+            self.gpu_status_var.set(f"GPU status: {latest_gpu}")
+        self._refresh_progress_text()
+        self.after(300, self._drain_gpu_status)
+
     def _run_tracked(self, cmd, cwd, on_done):
         def worker():
             self.log.log(f"$ {' '.join(cmd)}   (cwd={cwd})")
             try:
                 self._proc = subprocess.Popen(
-                    cmd, cwd=cwd,
+                    cmd, cwd=cwd, env=hashcat_env(),
                     stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                     text=True, bufsize=1,
                 )
                 for line in self._proc.stdout:
                     self.log.log(line)
+                    self._parse_gpu_status(line)
                 self._proc.wait()
                 self.log.log(f"[exit code {self._proc.returncode}]")
             except Exception as e:
@@ -961,7 +1457,7 @@ class CrackTab(ttk.Frame):
             messagebox.showerror("Hash file not found", "Browse to a valid hash file.")
             return
         cmd = [exe_abs, "-m", "22000", os.path.abspath(hash_file), "--show"]
-        run_streaming(cmd, self.log, cwd=hc_dir)
+        run_streaming(cmd, self.log, cwd=hc_dir, env=hashcat_env())
 
     def save_as(self):
         src = self.out_entry.get().strip()
@@ -1034,6 +1530,17 @@ class App(tk.Tk):
         self.title("MarauderZ for Windows PC")
         self.geometry("880x680")
 
+        ico_path = PHOTOS_DIR / "logo.ico"
+        if ico_path.is_file():
+            # .ico carries multiple resolutions - this is what Windows
+            # actually uses for the taskbar icon, not iconphoto()'s PNG
+            # (which mainly covers the title bar / Alt-Tab thumbnail and
+            # only reliably reaches the taskbar on some Tk/Windows builds).
+            try:
+                self.iconbitmap(default=str(ico_path))
+            except tk.TclError:
+                pass
+
         logo_path = PHOTOS_DIR / "logo.png"
         if logo_path.is_file():
             # Kept as an attribute, not a local - PhotoImage is garbage
@@ -1059,12 +1566,12 @@ class App(tk.Tk):
         notebook = ttk.Notebook(self)
         notebook.pack(fill="both", expand=True, padx=8, pady=8)
 
-        notebook.add(FlashTab(notebook, port_var), text="1. Flash")
-        notebook.add(CaptureTab(notebook, port_var), text="2. Capture")
-        notebook.add(ConvertTab(notebook), text="3. Convert")
-        notebook.add(InspectIsolateTab(notebook), text="4. Inspect & Isolate")
-        notebook.add(CrackTab(notebook, cracked_var), text="5. Crack")
-        notebook.add(ResultsTab(notebook, cracked_var), text="6. Results")
+        notebook.add(ScrollableTab(notebook, FlashTab, port_var), text="1. Flash")
+        notebook.add(ScrollableTab(notebook, CaptureTab, port_var), text="2. Capture")
+        notebook.add(ScrollableTab(notebook, ConvertTab), text="3. Convert")
+        notebook.add(ScrollableTab(notebook, InspectIsolateTab), text="4. Inspect & Isolate")
+        notebook.add(ScrollableTab(notebook, CrackTab, cracked_var), text="5. Crack")
+        notebook.add(ScrollableTab(notebook, ResultsTab, cracked_var), text="6. Results")
 
 
 def main():

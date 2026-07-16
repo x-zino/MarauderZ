@@ -22,3 +22,5 @@ __pycache__/
 /build/
 /dist/
 *.spec
+build_exe.ps1
+build_exe.bat
